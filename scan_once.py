@@ -1,82 +1,89 @@
+
 import logging
 import math
 import os
 import time
+import json
 import urllib.error
 import urllib.parse
 import urllib.request
-import json
 from datetime import datetime, timezone
 
 from supabase import create_client
 from telethon import TelegramClient, functions, errors
 from telethon.sessions import StringSession
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("username-hunter-action")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+log = logging.getLogger("username-hunter")
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_ID = os.environ["ADMIN_ID"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
+
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 TELETHON_SESSION = os.environ["TELETHON_SESSION"]
-DELAY = max(5.0, float(os.getenv("CHECK_DELAY", "5")))
-CHECKS_PER_RUN = max(1, min(20, int(os.getenv("CHECKS_PER_RUN", "20"))))
+
+DELAY = max(5.0, float(os.getenv("CHECK_DELAY", "10")))
+CHECKS_PER_RUN = max(1, min(5, int(os.getenv("CHECKS_PER_RUN", "5"))))
 PROGRESS_ID = 1
 
-# Generate a large deterministic stream of pronounceable five-letter names.
-# Pattern: consonant-vowel-consonant-vowel-consonant (CVCVC).
 CONSONANTS = "bcdfghjklmnprstvwyz"
 VOWELS = "aeiou"
 FIVE_LETTER_TOTAL = len(CONSONANTS) ** 3 * len(VOWELS) ** 2
 
-# An affine permutation visits every CVCVC combination once, in a shuffled order.
-# The multiplier must be coprime with FIVE_LETTER_TOTAL.
 SHUFFLE_MULTIPLIER = 104729
 SHUFFLE_OFFSET = 731
+
 assert math.gcd(SHUFFLE_MULTIPLIER, FIVE_LETTER_TOTAL) == 1
 
-# Recognizable/popular names are checked after the generated five-letter names.
-# Keep only valid-length alphabetic candidates; never append random digits.
 POPULAR_NAMES = """
 gram wallet durov toncoin telegram crypto bitcoin ethereum notcoin
 gifts stars premium username usernames fragment collectible collectibles
 blockchain trading trader exchange market finance money coins token tokens
 tonkeeper tonspace tonhub walletconnect airdrop launchpad minting digital
-avatar profile channel community messages messenger usernamehunter usernamehunt
-telegrambot telegramgift telegramstars telegramwallet
+avatar profile channel community messages messenger
 """
+
 POPULAR_CANDIDATES = list(dict.fromkeys(
-    word.lower() for word in POPULAR_NAMES.split()
+    word.lower()
+    for word in POPULAR_NAMES.split()
     if word.isalpha() and 5 <= len(word) <= 32
 ))
+
 TOTAL_CANDIDATES = FIVE_LETTER_TOTAL + len(POPULAR_CANDIDATES)
 
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-mtproto_client = TelegramClient(StringSession(TELETHON_SESSION), API_ID, API_HASH)
-mtproto_client.connect()
-if not mtproto_client.is_user_authorized():
-    mtproto_client.disconnect()
-    raise RuntimeError("TELETHON_SESSION is not authorized. Re-create the session in Termux.")
+client = TelegramClient(
+    StringSession(TELETHON_SESSION),
+    API_ID,
+    API_HASH
+)
 
 
 def generated_name(index):
-    """Return one unique CVCVC name for a zero-based generated-name index."""
-    shuffled = (SHUFFLE_MULTIPLIER * index + SHUFFLE_OFFSET) % FIVE_LETTER_TOTAL
+    value = (
+        SHUFFLE_MULTIPLIER * index + SHUFFLE_OFFSET
+    ) % FIVE_LETTER_TOTAL
 
-    # Mixed-radix decode: C, V, C, V, C.
-    c1 = shuffled % len(CONSONANTS)
-    shuffled //= len(CONSONANTS)
-    v1 = shuffled % len(VOWELS)
-    shuffled //= len(VOWELS)
-    c2 = shuffled % len(CONSONANTS)
-    shuffled //= len(CONSONANTS)
-    v2 = shuffled % len(VOWELS)
-    shuffled //= len(VOWELS)
-    c3 = shuffled % len(CONSONANTS)
+    c1 = value % len(CONSONANTS)
+    value //= len(CONSONANTS)
+
+    v1 = value % len(VOWELS)
+    value //= len(VOWELS)
+
+    c2 = value % len(CONSONANTS)
+    value //= len(CONSONANTS)
+
+    v2 = value % len(VOWELS)
+    value //= len(VOWELS)
+
+    c3 = value % len(CONSONANTS)
 
     return (
         CONSONANTS[c1] + VOWELS[v1] + CONSONANTS[c2]
@@ -87,8 +94,8 @@ def generated_name(index):
 def candidate_at(index):
     if index < FIVE_LETTER_TOTAL:
         return generated_name(index)
-    popular_index = index - FIVE_LETTER_TOTAL
-    return POPULAR_CANDIDATES[popular_index]
+
+    return POPULAR_CANDIDATES[index - FIVE_LETTER_TOTAL]
 
 
 def get_next_index():
@@ -99,17 +106,17 @@ def get_next_index():
         .limit(1)
         .execute()
     )
+
     if not result.data:
-        raise RuntimeError(
-            "Progress row is missing. Run supabase/scan_progress.sql in Supabase SQL Editor."
-        )
+        raise RuntimeError("Progress row is missing.")
+
     return int(result.data[0]["next_index"])
 
 
 def save_next_index(index):
     db.table("scan_progress").update({
         "next_index": index,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat()
     }).eq("id", PROGRESS_ID).execute()
 
 
@@ -128,131 +135,146 @@ def save_result(username, status):
     db.table("checked_usernames").upsert({
         "username": username,
         "status": status,
-        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "checked_at": datetime.now(timezone.utc).isoformat()
     }).execute()
 
 
-def telegram_api(method, values):
+def bot_request(method, values):
     body = urllib.parse.urlencode(values).encode()
+
     request = urllib.request.Request(
         f"https://api.telegram.org/bot{BOT_TOKEN}/{method}",
         data=body,
-        method="POST",
+        method="POST"
     )
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            return json.loads(response.read().decode())
-    except urllib.error.HTTPError as exc:
-        try:
-            payload = json.loads(exc.read().decode())
-        except Exception:
-            payload = {}
-        if exc.code == 429:
-            retry_after = int((payload.get("parameters") or {}).get("retry_after", 60))
-            log.warning("Telegram rate limit; waiting %s seconds.", retry_after)
-            time.sleep(min(max(retry_after, 5), 180))
-            raise RuntimeError("Telegram rate limit (429); stopping this run.") from exc
-        if exc.code >= 500:
-            raise RuntimeError(f"Telegram server error ({exc.code}); candidate will be retried.") from exc
-        return payload
 
-
-def notify_batch(usernames, checked, next_candidate):
-    shown = usernames[:15]
-    lines = [
-        "🔎 Результаты проверки Telegram MTProto",
-        f"Проверено кандидатов: {checked}",
-    ]
-    if shown:
-        lines.extend([
-            "🎉 Доступны для назначения на аккаунт на момент проверки:",
-            *[f"@{name}" for name in shown],
-        ])
-        if len(usernames) > len(shown):
-            lines.append(f"И ещё {len(usernames) - len(shown)} доступных кандидатов.")
-    else:
-        lines.append("Пока свободных для назначения имён не найдено.")
-    lines.extend([
-        "",
-        "Проверка выполнена Telegram для авторизованного аккаунта. Доступность может измениться, поэтому найденное имя нужно сразу попробовать установить.",
-        f"Следующий кандидат: @{next_candidate}" if next_candidate != "completed" else "Список кандидатов завершён.",
-    ])
-    result = telegram_api("sendMessage", {"chat_id": ADMIN_ID, "text": "\\n".join(lines)})
-    if not result.get("ok"):
-        raise RuntimeError(f"Could not send batch notification: {result}")
+    with urllib.request.urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode())
 
 
 def inspect_username(username):
     try:
-        available = mtproto_client(functions.account.CheckUsernameRequest(username=username))
-        return "username_available" if available else "username_occupied"
+        available = client(
+            functions.account.CheckUsernameRequest(username=username)
+        )
+
+        if available:
+            return "username_available"
+
+        return "username_occupied"
+
     except errors.RPCError as exc:
         message = str(getattr(exc, "message", exc)).upper()
-        if "USERNAME_PURCHASE_AVAILABLE" in message:
-            return "username_collectible_only"
+
         if "USERNAME_OCCUPIED" in message:
             return "username_occupied"
+
+        if "USERNAME_PURCHASE_AVAILABLE" in message:
+            return "username_collectible_only"
+
         if "USERNAME_INVALID" in message:
             return "username_invalid"
-        raise RuntimeError(f"Telegram MTProto check failed: {message}") from exc
+
+        if "FLOOD_WAIT" in message:
+            raise RuntimeError(
+                "Telegram imposed a flood limit. Stopping safely."
+            ) from exc
+
+        raise
+
+
+def notify_batch(available, checked, next_candidate):
+    lines = [
+        "🔎 USERNAME HUNTER — MTProto",
+        f"Проверено: {checked}",
+        f"Доступных имён: {len(available)}",
+        ""
+    ]
+
+    if available:
+        lines.append("🎉 Можно попробовать назначить:")
+        lines.extend(f"@{name}" for name in available[:15])
+    else:
+        lines.append("В этой партии доступных имён не найдено.")
+
+    lines.extend([
+        "",
+        "Проверка выполнена Telegram для авторизованного аккаунта.",
+        "Доступность может измениться — найденное имя нужно назначить как можно скорее.",
+        f"Следующий кандидат: @{next_candidate}"
+        if next_candidate != "completed"
+        else "Все кандидаты проверены."
+    ])
+
+    result = bot_request("sendMessage", {
+        "chat_id": ADMIN_ID,
+        "text": "\n".join(lines)
+    })
+
+    if not result.get("ok"):
+        raise RuntimeError(f"Notification failed: {result}")
 
 
 def run_scan():
     checked = 0
     available = []
+
     next_index = get_next_index()
 
     if next_index >= TOTAL_CANDIDATES:
-        telegram_api("sendMessage", {
+        bot_request("sendMessage", {
             "chat_id": ADMIN_ID,
-            "text": "🏁 Все сгенерированные пятибуквенные варианты и популярные слова проверены."
+            "text": "🏁 Все кандидаты проверены."
         })
-        log.info("All generated and curated candidates have been scanned.")
         return
 
     while checked < CHECKS_PER_RUN and next_index < TOTAL_CANDIDATES:
         username = candidate_at(next_index)
 
-        try:
-            if already_checked(username):
-                next_index += 1
-                save_next_index(next_index)
-                continue
-
-            status = inspect_username(username)
-            save_result(username, status)
-
-            # Persist the cursor only after the result has been stored.
+        if already_checked(username):
             next_index += 1
             save_next_index(next_index)
-            checked += 1
+            continue
 
-            log.info("@%s: %s (next index: %s/%s)", username, status, next_index, TOTAL_CANDIDATES)
+        status = inspect_username(username)
 
-            if status == "username_available":
-                available.append(username)
+        save_result(username, status)
 
-            if checked < CHECKS_PER_RUN and next_index < TOTAL_CANDIDATES:
-                time.sleep(DELAY)
+        next_index += 1
+        save_next_index(next_index)
+        checked += 1
 
-        except Exception:
-            log.exception("Check failed; stopping this run. The current candidate will be retried.")
-            break
+        log.info("@%s: %s", username, status)
 
-    next_candidate = candidate_at(next_index) if next_index < TOTAL_CANDIDATES else "completed"
-    log.info(
-        "Finished. Checked this run: %s; available: %s; next candidate: %s",
-        checked, len(available), next_candidate,
+        if status == "username_available":
+            available.append(username)
+
+        if checked < CHECKS_PER_RUN:
+            time.sleep(DELAY)
+
+    next_candidate = (
+        candidate_at(next_index)
+        if next_index < TOTAL_CANDIDATES
+        else "completed"
     )
+
     if checked:
-        try:
-            notify_batch(available, checked, next_candidate)
-        except Exception:
-            log.exception("Could not send scan summary notification.")
+        notify_batch(available, checked, next_candidate)
 
 
-if __name__ == "__main__":
+def main():
+    client.connect()
+
+    if not client.is_user_authorized():
+        raise RuntimeError(
+            "Telegram session is not authorized. Check TELETHON_SESSION."
+        )
+
     try:
         run_scan()
     finally:
-        mtproto_client.disconnect()
+        client.disconnect()
+
+
+if __name__ == "__main__":
+    main()

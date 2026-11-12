@@ -290,7 +290,7 @@ def recheck_saved_available():
         lines.extend(["", "Старые ложноположительные результаты сняты."])
     bot_request("sendMessage", {
         "chat_id": ADMIN_ID,
-        "text": "\\n".join(lines)
+        "text": "\n".join(lines)
     })
 
 

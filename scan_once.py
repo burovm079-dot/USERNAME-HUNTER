@@ -1,6 +1,5 @@
 import logging
 import os
-import string
 import time
 import urllib.error
 import urllib.parse
@@ -19,24 +18,45 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
 DELAY = max(5.0, float(os.getenv("CHECK_DELAY", "5")))
 CHECKS_PER_RUN = max(1, min(20, int(os.getenv("CHECKS_PER_RUN", "20"))))
-
-# Keyboard order, matching the requested sequence: qqqqq, qqqqw, qqqqe...
-ALPHABET = "qwertyuiopasdfghjklzxcvbnm"
-BASE = len(ALPHABET)
-TOTAL_COMBINATIONS = BASE ** 5
 PROGRESS_ID = 1
 
+# First: curated, pronounceable five-letter names. No digits or underscores.
+FIVE_LETTER_NAMES = """
+torol total relog polit wecor verio novar velox lumen nexor
+arvox avior belor brevo calix cavor celio corvo daren delio
+deron devor elora emiro evora falor felix feron fiaro fleno
+galor genio geron havio helio ivora javor kelio kavor kevor
+laron lavio levor lexor livor lorin mavio melor merio milor
+navio nelor nevio norix novio orion orvio palor pavio pelor
+perio pexor qevor ravor relio renor revio roven savio selor
+serio sevon solor talor tavio telor terio tivor toren trivo
+ulnor valio velar velio venor veron vireo volar voren vorix
+wavor welio xavor yavor zelor zenor zorio
+"""
+# Second: recognizable names and topics of varying length. No random suffixes.
+POPULAR_NAMES = """
+gram wallet durov toncoin telegram crypto bitcoin ethereum ton
+notcoin nft gifts stars premium username usernames fragment
+fragmentcom collectible collectibles blockchain web3 defi
+trading trader exchange market finance money coins token
+tokens blockchain walletconnect tonkeeper tonspace tonhub
+telegrambot telegramgift telegramstars telegramwallet
+airdrop launchpad minting digital avatar profile channel
+community messages messenger usernamehunter usernamehunt
+"""
+
+def build_candidates():
+    five = [word.lower() for word in FIVE_LETTER_NAMES.split()
+            if len(word) == 5 and word.isalpha()]
+    popular = [word.lower() for word in POPULAR_NAMES.split()
+               if word.isalpha() and len(word) >= 4]
+    # Keep order while removing duplicates.
+    return list(dict.fromkeys(five + popular))
+
+CANDIDATES = build_candidates()
+TOTAL_CANDIDATES = len(CANDIDATES)
+
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-
-def username_at(index):
-    """Convert a zero-based counter to a 5-letter username in keyboard order."""
-    chars = ["q"] * 5
-    value = index
-    for position in range(4, -1, -1):
-        chars[position] = ALPHABET[value % BASE]
-        value //= BASE
-    return "".join(chars)
 
 
 def get_next_index():
@@ -126,16 +146,16 @@ def run_scan():
     not_found = 0
     next_index = get_next_index()
 
-    if next_index >= TOTAL_COMBINATIONS:
+    if next_index >= TOTAL_CANDIDATES:
         telegram_api("sendMessage", {
             "chat_id": ADMIN_ID,
-            "text": "🏁 Последовательность всех 5-буквенных комбинаций завершена."
+            "text": "🏁 Все подготовленные осмысленные варианты проверены. Список можно расширить."
         })
-        log.info("All 5-letter combinations have been scanned.")
+        log.info("All curated candidates have been scanned.")
         return
 
-    while checked < CHECKS_PER_RUN and next_index < TOTAL_COMBINATIONS:
-        username = username_at(next_index)
+    while checked < CHECKS_PER_RUN and next_index < TOTAL_CANDIDATES:
+        username = CANDIDATES[next_index]
 
         try:
             if already_checked(username):
@@ -151,24 +171,23 @@ def run_scan():
             save_next_index(next_index)
             checked += 1
 
-            log.info("@%s: %s (next index: %s)", username, status, next_index)
+            log.info("@%s: %s (next index: %s/%s)", username, status, next_index, TOTAL_CANDIDATES)
 
             if status == "not_found_unverified":
                 not_found += 1
                 notify(username)
 
-            if checked < CHECKS_PER_RUN and next_index < TOTAL_COMBINATIONS:
+            if checked < CHECKS_PER_RUN and next_index < TOTAL_CANDIDATES:
                 time.sleep(DELAY)
 
         except Exception:
             log.exception("Check failed; stopping this run. The current candidate will be retried.")
             break
 
+    next_candidate = CANDIDATES[next_index] if next_index < TOTAL_CANDIDATES else "completed"
     log.info(
         "Finished. Checked this run: %s; not found but unverified: %s; next candidate: %s",
-        checked,
-        not_found,
-        username_at(next_index) if next_index < TOTAL_COMBINATIONS else "completed",
+        checked, not_found, next_candidate,
     )
 
 

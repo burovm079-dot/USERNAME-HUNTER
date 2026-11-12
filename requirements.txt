@@ -1,3 +1,2 @@
 python-telegram-bot>=21.6,<23
-Telethon>=1.37,<2
 supabase>=2.10,<3

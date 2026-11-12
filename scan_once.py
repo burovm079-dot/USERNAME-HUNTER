@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import time
 import urllib.error
@@ -20,43 +21,63 @@ DELAY = max(5.0, float(os.getenv("CHECK_DELAY", "5")))
 CHECKS_PER_RUN = max(1, min(20, int(os.getenv("CHECKS_PER_RUN", "20"))))
 PROGRESS_ID = 1
 
-# First: curated, pronounceable five-letter names. No digits or underscores.
-FIVE_LETTER_NAMES = """
-torol total relog polit wecor verio novar velox lumen nexor
-arvox avior belor brevo calix cavor celio corvo daren delio
-deron devor elora emiro evora falor felix feron fiaro fleno
-galor genio geron havio helio ivora javor kelio kavor kevor
-laron lavio levor lexor livor lorin mavio melor merio milor
-navio nelor nevio norix novio orion orvio palor pavio pelor
-perio pexor qevor ravor relio renor revio roven savio selor
-serio sevon solor talor tavio telor terio tivor toren trivo
-ulnor valio velar velio venor veron vireo volar voren vorix
-wavor welio xavor yavor zelor zenor zorio
-"""
-# Second: recognizable names and topics of varying length. No random suffixes.
+# Generate a large deterministic stream of pronounceable five-letter names.
+# Pattern: consonant-vowel-consonant-vowel-consonant (CVCVC).
+CONSONANTS = "bcdfghjklmnprstvwyz"
+VOWELS = "aeiou"
+FIVE_LETTER_TOTAL = len(CONSONANTS) ** 3 * len(VOWELS) ** 2
+
+# An affine permutation visits every CVCVC combination once, in a shuffled order.
+# The multiplier must be coprime with FIVE_LETTER_TOTAL.
+SHUFFLE_MULTIPLIER = 104729
+SHUFFLE_OFFSET = 731
+assert math.gcd(SHUFFLE_MULTIPLIER, FIVE_LETTER_TOTAL) == 1
+
+# Recognizable/popular names are checked after the generated five-letter names.
+# Keep only valid-length alphabetic candidates; never append random digits.
 POPULAR_NAMES = """
-gram wallet durov toncoin telegram crypto bitcoin ethereum ton
-notcoin nft gifts stars premium username usernames fragment
-fragmentcom collectible collectibles blockchain web3 defi
-trading trader exchange market finance money coins token
-tokens blockchain walletconnect tonkeeper tonspace tonhub
+gram wallet durov toncoin telegram crypto bitcoin ethereum notcoin
+gifts stars premium username usernames fragment collectible collectibles
+blockchain trading trader exchange market finance money coins token tokens
+tonkeeper tonspace tonhub walletconnect airdrop launchpad minting digital
+avatar profile channel community messages messenger usernamehunter usernamehunt
 telegrambot telegramgift telegramstars telegramwallet
-airdrop launchpad minting digital avatar profile channel
-community messages messenger usernamehunter usernamehunt
 """
-
-def build_candidates():
-    five = [word.lower() for word in FIVE_LETTER_NAMES.split()
-            if len(word) == 5 and word.isalpha()]
-    popular = [word.lower() for word in POPULAR_NAMES.split()
-               if word.isalpha() and len(word) >= 4]
-    # Keep order while removing duplicates.
-    return list(dict.fromkeys(five + popular))
-
-CANDIDATES = build_candidates()
-TOTAL_CANDIDATES = len(CANDIDATES)
+POPULAR_CANDIDATES = list(dict.fromkeys(
+    word.lower() for word in POPULAR_NAMES.split()
+    if word.isalpha() and 5 <= len(word) <= 32
+))
+TOTAL_CANDIDATES = FIVE_LETTER_TOTAL + len(POPULAR_CANDIDATES)
 
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+
+def generated_name(index):
+    """Return one unique CVCVC name for a zero-based generated-name index."""
+    shuffled = (SHUFFLE_MULTIPLIER * index + SHUFFLE_OFFSET) % FIVE_LETTER_TOTAL
+
+    # Mixed-radix decode: C, V, C, V, C.
+    c1 = shuffled % len(CONSONANTS)
+    shuffled //= len(CONSONANTS)
+    v1 = shuffled % len(VOWELS)
+    shuffled //= len(VOWELS)
+    c2 = shuffled % len(CONSONANTS)
+    shuffled //= len(CONSONANTS)
+    v2 = shuffled % len(VOWELS)
+    shuffled //= len(VOWELS)
+    c3 = shuffled % len(CONSONANTS)
+
+    return (
+        CONSONANTS[c3] + VOWELS[v2] + CONSONANTS[c2]
+        + VOWELS[v1] + CONSONANTS[c1]
+    )
+
+
+def candidate_at(index):
+    if index < FIVE_LETTER_TOTAL:
+        return generated_name(index)
+    popular_index = index - FIVE_LETTER_TOTAL
+    return POPULAR_CANDIDATES[popular_index]
 
 
 def get_next_index():
@@ -149,13 +170,13 @@ def run_scan():
     if next_index >= TOTAL_CANDIDATES:
         telegram_api("sendMessage", {
             "chat_id": ADMIN_ID,
-            "text": "🏁 Все подготовленные осмысленные варианты проверены. Список можно расширить."
+            "text": "🏁 Все сгенерированные пятибуквенные варианты и популярные слова проверены."
         })
-        log.info("All curated candidates have been scanned.")
+        log.info("All generated and curated candidates have been scanned.")
         return
 
     while checked < CHECKS_PER_RUN and next_index < TOTAL_CANDIDATES:
-        username = CANDIDATES[next_index]
+        username = candidate_at(next_index)
 
         try:
             if already_checked(username):
@@ -184,7 +205,7 @@ def run_scan():
             log.exception("Check failed; stopping this run. The current candidate will be retried.")
             break
 
-    next_candidate = CANDIDATES[next_index] if next_index < TOTAL_CANDIDATES else "completed"
+    next_candidate = candidate_at(next_index) if next_index < TOTAL_CANDIDATES else "completed"
     log.info(
         "Finished. Checked this run: %s; not found but unverified: %s; next candidate: %s",
         checked, not_found, next_candidate,

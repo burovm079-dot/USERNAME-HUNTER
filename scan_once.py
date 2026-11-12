@@ -102,7 +102,7 @@ def telegram_api(method, values):
 
 def notify(username):
     message = (
-        f"🔎 Кандидат @{username}: Bot API не нашёл публичный чат.\\n"
+        f"🔎 Кандидат @{username}: Bot API не нашёл публичный чат.\n"
         "⚠️ Это НЕ подтверждает, что имя свободно: личный username может быть занят. "
         "Результат требует отдельной проверки."
     )

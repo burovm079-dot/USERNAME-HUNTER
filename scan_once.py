@@ -9,6 +9,8 @@ import json
 from datetime import datetime, timezone
 
 from supabase import create_client
+from telethon import TelegramClient, functions, errors
+from telethon.sessions import StringSession
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("username-hunter-action")
@@ -17,6 +19,9 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_ID = os.environ["ADMIN_ID"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
+API_ID = int(os.environ["API_ID"])
+API_HASH = os.environ["API_HASH"]
+TELETHON_SESSION = os.environ["TELETHON_SESSION"]
 DELAY = max(5.0, float(os.getenv("CHECK_DELAY", "5")))
 CHECKS_PER_RUN = max(1, min(20, int(os.getenv("CHECKS_PER_RUN", "20"))))
 PROGRESS_ID = 1
@@ -50,6 +55,12 @@ POPULAR_CANDIDATES = list(dict.fromkeys(
 TOTAL_CANDIDATES = FIVE_LETTER_TOTAL + len(POPULAR_CANDIDATES)
 
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+mtproto_client = TelegramClient(StringSession(TELETHON_SESSION), API_ID, API_HASH)
+mtproto_client.connect()
+if not mtproto_client.is_user_authorized():
+    mtproto_client.disconnect()
+    raise RuntimeError("TELETHON_SESSION is not authorized. Re-create the session in Termux.")
 
 
 def generated_name(index):
@@ -147,20 +158,23 @@ def telegram_api(method, values):
 
 
 def notify_batch(usernames, checked, next_candidate):
-    if not usernames:
-        return
     shown = usernames[:15]
     lines = [
-        "🔎 Результаты очередной проверки",
+        "🔎 Результаты проверки Telegram MTProto",
         f"Проверено кандидатов: {checked}",
-        "Bot API не обнаружил публичный чат у:",
-        *[f"@{name}" for name in shown],
     ]
-    if len(usernames) > len(shown):
-        lines.append(f"И ещё {len(usernames) - len(shown)} кандидатов.")
+    if shown:
+        lines.extend([
+            "🎉 Доступны для назначения на аккаунт на момент проверки:",
+            *[f"@{name}" for name in shown],
+        ])
+        if len(usernames) > len(shown):
+            lines.append(f"И ещё {len(usernames) - len(shown)} доступных кандидатов.")
+    else:
+        lines.append("Пока свободных для назначения имён не найдено.")
     lines.extend([
         "",
-        "⚠️ Это НЕ означает, что username свободен. Bot API не проверяет доступность личных аккаунтов.",
+        "Проверка выполнена Telegram для авторизованного аккаунта. Доступность может измениться, поэтому найденное имя нужно сразу попробовать установить.",
         f"Следующий кандидат: @{next_candidate}" if next_candidate != "completed" else "Список кандидатов завершён.",
     ])
     result = telegram_api("sendMessage", {"chat_id": ADMIN_ID, "text": "\\n".join(lines)})
@@ -169,18 +183,23 @@ def notify_batch(usernames, checked, next_candidate):
 
 
 def inspect_username(username):
-    result = telegram_api("getChat", {"chat_id": f"@{username}"})
-    if result.get("ok"):
-        return "public_chat_found"
-    description = str(result.get("description", "")).lower()
-    if "chat not found" in description or "username not found" in description:
-        return "not_found_unverified"
-    raise RuntimeError(f"Telegram getChat failed: {result}")
+    try:
+        available = mtproto_client(functions.account.CheckUsernameRequest(username=username))
+        return "username_available" if available else "username_occupied"
+    except errors.RPCError as exc:
+        message = str(getattr(exc, "message", exc)).upper()
+        if "USERNAME_PURCHASE_AVAILABLE" in message:
+            return "username_collectible_only"
+        if "USERNAME_OCCUPIED" in message:
+            return "username_occupied"
+        if "USERNAME_INVALID" in message:
+            return "username_invalid"
+        raise RuntimeError(f"Telegram MTProto check failed: {message}") from exc
 
 
 def run_scan():
     checked = 0
-    not_found = []
+    available = []
     next_index = get_next_index()
 
     if next_index >= TOTAL_CANDIDATES:
@@ -210,8 +229,8 @@ def run_scan():
 
             log.info("@%s: %s (next index: %s/%s)", username, status, next_index, TOTAL_CANDIDATES)
 
-            if status == "not_found_unverified":
-                not_found.append(username)
+            if status == "username_available":
+                available.append(username)
 
             if checked < CHECKS_PER_RUN and next_index < TOTAL_CANDIDATES:
                 time.sleep(DELAY)
@@ -222,15 +241,18 @@ def run_scan():
 
     next_candidate = candidate_at(next_index) if next_index < TOTAL_CANDIDATES else "completed"
     log.info(
-        "Finished. Checked this run: %s; not found but unverified: %s; next candidate: %s",
-        checked, len(not_found), next_candidate,
+        "Finished. Checked this run: %s; available: %s; next candidate: %s",
+        checked, len(available), next_candidate,
     )
     if checked:
         try:
-            notify_batch(not_found, checked, next_candidate)
+            notify_batch(available, checked, next_candidate)
         except Exception:
             log.exception("Could not send scan summary notification.")
 
 
 if __name__ == "__main__":
-    run_scan()
+    try:
+        run_scan()
+    finally:
+        mtproto_client.disconnect()

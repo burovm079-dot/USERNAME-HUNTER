@@ -21,8 +21,11 @@ jobs:
       ADMIN_ID: ${{ secrets.ADMIN_ID }}
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-      CHECK_DELAY: "5"
-      CHECKS_PER_RUN: "20"
+      API_ID: ${{ secrets.API_ID }}
+      API_HASH: ${{ secrets.API_HASH }}
+      TELETHON_SESSION: ${{ secrets.TELETHON_SESSION }}
+      CHECK_DELAY: "10"
+      CHECKS_PER_RUN: "5"
     steps:
       - name: Check out repository
         uses: actions/checkout@v4

@@ -68,8 +68,8 @@ def generated_name(index):
     c3 = shuffled % len(CONSONANTS)
 
     return (
-        CONSONANTS[c3] + VOWELS[v2] + CONSONANTS[c2]
-        + VOWELS[v1] + CONSONANTS[c1]
+        CONSONANTS[c1] + VOWELS[v1] + CONSONANTS[c2]
+        + VOWELS[v2] + CONSONANTS[c3]
     )
 
 

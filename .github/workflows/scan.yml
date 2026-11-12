@@ -3,7 +3,6 @@ name: USERNAME HUNTER scan
 on:
   workflow_dispatch:
   schedule:
-    # GitHub scheduled workflows have a minimum 5-minute interval.
     - cron: "3/5 * * * *"
 
 permissions:
@@ -18,9 +17,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 4
     env:
-      API_ID: ${{ secrets.API_ID }}
-      API_HASH: ${{ secrets.API_HASH }}
-      TELETHON_SESSION: ${{ secrets.TELETHON_SESSION }}
       BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
       ADMIN_ID: ${{ secrets.ADMIN_ID }}
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}

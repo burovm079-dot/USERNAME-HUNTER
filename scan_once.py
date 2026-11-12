@@ -1,6 +1,5 @@
 import logging
 import os
-import random
 import string
 import time
 import urllib.error
@@ -20,38 +19,56 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
 DELAY = max(5.0, float(os.getenv("CHECK_DELAY", "5")))
 CHECKS_PER_RUN = max(1, min(20, int(os.getenv("CHECKS_PER_RUN", "20"))))
-ABC = string.ascii_lowercase
-VOWELS = "aeiou"
-CONSONANTS = "bcdfghjklmnpqrstvwxyz"
+
+# Keyboard order, matching the requested sequence: qqqqq, qqqqw, qqqqe...
+ALPHABET = "qwertyuiopasdfghjklzxcvbnm"
+BASE = len(ALPHABET)
+TOTAL_COMBINATIONS = BASE ** 5
+PROGRESS_ID = 1
 
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-def random_candidate():
-    return "".join(random.choices(ABC, k=5))
+def username_at(index):
+    """Convert a zero-based counter to a 5-letter username in keyboard order."""
+    chars = ["q"] * 5
+    value = index
+    for position in range(4, -1, -1):
+        chars[position] = ALPHABET[value % BASE]
+        value //= BASE
+    return "".join(chars)
 
 
-def readable_candidate():
-    pattern = random.randrange(4)
-    if pattern == 0:
-        return random.choice(ABC) * 2 + "".join(random.choices(ABC, k=3))
-    if pattern == 1:
-        return "".join((random.choice(CONSONANTS), random.choice(VOWELS),
-                        random.choice(CONSONANTS), random.choice(VOWELS),
-                        random.choice(CONSONANTS)))
-    if pattern == 2:
-        a, b, c = random.choices(ABC, k=3)
-        return a + b + c + b + a
-    a, b = random.choices(ABC, k=2)
-    return a + b + b + a + random.choice(ABC)
+def get_next_index():
+    result = (
+        db.table("scan_progress")
+        .select("next_index")
+        .eq("id", PROGRESS_ID)
+        .limit(1)
+        .execute()
+    )
+    if not result.data:
+        raise RuntimeError(
+            "Progress row is missing. Run supabase/scan_progress.sql in Supabase SQL Editor."
+        )
+    return int(result.data[0]["next_index"])
 
 
-def candidate():
-    return readable_candidate() if random.random() < 0.5 else random_candidate()
+def save_next_index(index):
+    db.table("scan_progress").update({
+        "next_index": index,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", PROGRESS_ID).execute()
 
 
 def already_checked(username):
-    result = db.table("checked_usernames").select("username").eq("username", username).limit(1).execute()
+    result = (
+        db.table("checked_usernames")
+        .select("username")
+        .eq("username", username)
+        .limit(1)
+        .execute()
+    )
     return bool(result.data)
 
 
@@ -84,12 +101,12 @@ def telegram_api(method, values):
 
 
 def notify(username):
-    text = (
-        f"🔎 Проверка @{username}: Bot API не нашёл публичный чат с таким именем.\n"
-        "⚠️ Это НЕ означает, что username свободен: имя может принадлежать пользователю "
-        "или быть недоступным для проверки через Bot API. Проверь вручную в Telegram."
+    message = (
+        f"🔎 Кандидат @{username}: Bot API не нашёл публичный чат.\\n"
+        "⚠️ Это НЕ подтверждает, что имя свободно: личный username может быть занят. "
+        "Результат требует отдельной проверки."
     )
-    result = telegram_api("sendMessage", {"chat_id": ADMIN_ID, "text": text})
+    result = telegram_api("sendMessage", {"chat_id": ADMIN_ID, "text": message})
     if not result.get("ok"):
         raise RuntimeError(f"Could not send Telegram notification: {result}")
 
@@ -107,26 +124,52 @@ def inspect_username(username):
 def run_scan():
     checked = 0
     not_found = 0
-    attempts = 0
-    while checked < CHECKS_PER_RUN and attempts < CHECKS_PER_RUN * 5:
-        attempts += 1
-        username = candidate()
-        if already_checked(username):
-            continue
+    next_index = get_next_index()
+
+    if next_index >= TOTAL_COMBINATIONS:
+        telegram_api("sendMessage", {
+            "chat_id": ADMIN_ID,
+            "text": "🏁 Последовательность всех 5-буквенных комбинаций завершена."
+        })
+        log.info("All 5-letter combinations have been scanned.")
+        return
+
+    while checked < CHECKS_PER_RUN and next_index < TOTAL_COMBINATIONS:
+        username = username_at(next_index)
+
         try:
+            if already_checked(username):
+                next_index += 1
+                save_next_index(next_index)
+                continue
+
             status = inspect_username(username)
             save_result(username, status)
+
+            # Persist the cursor only after the result has been stored.
+            next_index += 1
+            save_next_index(next_index)
             checked += 1
-            log.info("@%s: %s", username, status)
+
+            log.info("@%s: %s (next index: %s)", username, status, next_index)
+
             if status == "not_found_unverified":
                 not_found += 1
                 notify(username)
-            if checked < CHECKS_PER_RUN:
+
+            if checked < CHECKS_PER_RUN and next_index < TOTAL_COMBINATIONS:
                 time.sleep(DELAY)
+
         except Exception:
-            log.exception("Check failed; stopping this run to avoid repeated requests.")
+            log.exception("Check failed; stopping this run. The current candidate will be retried.")
             break
-    log.info("Finished. Checked: %s; not found but unverified: %s.", checked, not_found)
+
+    log.info(
+        "Finished. Checked this run: %s; not found but unverified: %s; next candidate: %s",
+        checked,
+        not_found,
+        username_at(next_index) if next_index < TOTAL_COMBINATIONS else "completed",
+    )
 
 
 if __name__ == "__main__":

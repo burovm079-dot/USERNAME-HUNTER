@@ -253,6 +253,47 @@ def notify_batch(available, checked, next_candidate):
         raise RuntimeError(f"Notification failed: {result}")
 
 
+
+def recheck_saved_available():
+    # Revalidate old positive results created by the previous checker.
+    result = (
+        db.table("checked_usernames")
+        .select("username")
+        .eq("status", "username_available")
+        .limit(50)
+        .execute()
+    )
+    rows = result.data or []
+    if not rows:
+        return
+
+    still_available = []
+    for index, row in enumerate(rows):
+        username = row["username"]
+        status = inspect_username(username)
+        save_result(username, status)
+        log.info("RECHECK @%s: %s", username, status)
+        if status == "username_available":
+            still_available.append(username)
+        if index < len(rows) - 1:
+            time.sleep(DELAY)
+
+    lines = [
+        "🧪 Повторная проверка старых результатов",
+        f"Перепроверено: {len(rows)}",
+        f"Подтверждено свободных: {len(still_available)}",
+    ]
+    if still_available:
+        lines.extend(["", "🎉 Сейчас доступны по проверке:"])
+        lines.extend(f"@{name}" for name in still_available)
+    else:
+        lines.extend(["", "Старые ложноположительные результаты сняты."])
+    bot_request("sendMessage", {
+        "chat_id": ADMIN_ID,
+        "text": "\\n".join(lines)
+    })
+
+
 def run_scan():
     checked = 0
     available = []
@@ -310,6 +351,7 @@ def main():
 
     try:
         verify_checker()
+        recheck_saved_available()
         run_scan()
     finally:
         client.disconnect()

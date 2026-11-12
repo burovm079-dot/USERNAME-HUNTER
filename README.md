@@ -45,3 +45,21 @@ Deploy as an always-on Docker/background worker and attach persistent storage on
 
 ## Important
 Availability is a point-in-time result, not a reservation. Another user may claim the username immediately. The bot does not claim or automatically assign names. Telegram may impose FloodWait; the scanner waits when Telegram asks it to. Keep checks conservative and stop if Telegram reports rate limits.
+
+
+## GitHub Actions scheduled scanning
+The repository includes `.github/workflows/scan.yml` and `scan_once.py`. The workflow can be started manually from the Actions tab and is scheduled every five minutes. Each run checks up to 20 new candidates with a minimum five-second delay. GitHub may delay scheduled starts; this is not a continuously running 24/7 process.
+
+### Add GitHub Actions secrets
+In the repository, open Settings -> Secrets and variables -> Actions -> New repository secret. Add these names exactly:
+- `API_ID`
+- `API_HASH`
+- `TELETHON_SESSION`
+- `BOT_TOKEN`
+- `ADMIN_ID`
+- `SUPABASE_URL`
+- `SUPABASE_SECRET_KEY`
+
+Use the values from your own Telegram and Supabase accounts. Never commit them to files or paste them into chat. The Supabase secret key must remain server-side. The Telegram user session string is highly sensitive: anyone who obtains it may access the associated Telegram account.
+
+After adding all secrets, open Actions -> USERNAME HUNTER scan -> Run workflow. Check the run log for success. Do not share logs if they contain secret values.

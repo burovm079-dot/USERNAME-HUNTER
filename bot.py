@@ -83,6 +83,9 @@ async def loop(app):
     finally:
         scan_task = None
 
+async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"Твой Telegram ID: {update.effective_user.id}")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not owner(update): return await guard(update)
     await update.message.reply_text("USERNAME HUNTER\n/scan — оба режима\n/scan_random — случайные\n/scan_beautiful — красивые\n/stop — остановить\n/status — статистика\n/list — найденные\n/export — CSV")
@@ -143,7 +146,7 @@ async def post_shutdown(app):
 
 def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
-    for command, handler in [("start",start),("scan",scan),("scan_random",scan_random),("scan_beautiful",scan_beautiful),("stop",stop),("status",status),("list",listing),("export",export_csv)]:
+    for command, handler in [("myid",myid),("start",start),("scan",scan),("scan_random",scan_random),("scan_beautiful",scan_beautiful),("stop",stop),("status",status),("list",listing),("export",export_csv)]:
         app.add_handler(CommandHandler(command, handler))
     app.run_polling(drop_pending_updates=True)
 

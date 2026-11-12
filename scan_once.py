@@ -137,19 +137,35 @@ def telegram_api(method, values):
         except Exception:
             payload = {}
         if exc.code == 429:
+            retry_after = int((payload.get("parameters") or {}).get("retry_after", 60))
+            log.warning("Telegram rate limit; waiting %s seconds.", retry_after)
+            time.sleep(min(max(retry_after, 5), 180))
             raise RuntimeError("Telegram rate limit (429); stopping this run.") from exc
+        if exc.code >= 500:
+            raise RuntimeError(f"Telegram server error ({exc.code}); candidate will be retried.") from exc
         return payload
 
 
-def notify(username):
-    message = (
-        f"🔎 Кандидат @{username}: Bot API не нашёл публичный чат.\n"
-        "⚠️ Это НЕ подтверждает, что имя свободно: личный username может быть занят. "
-        "Результат требует отдельной проверки."
-    )
-    result = telegram_api("sendMessage", {"chat_id": ADMIN_ID, "text": message})
+def notify_batch(usernames, checked, next_candidate):
+    if not usernames:
+        return
+    shown = usernames[:15]
+    lines = [
+        "🔎 Результаты очередной проверки",
+        f"Проверено кандидатов: {checked}",
+        "Bot API не обнаружил публичный чат у:",
+        *[f"@{name}" for name in shown],
+    ]
+    if len(usernames) > len(shown):
+        lines.append(f"И ещё {len(usernames) - len(shown)} кандидатов.")
+    lines.extend([
+        "",
+        "⚠️ Это НЕ означает, что username свободен. Bot API не проверяет доступность личных аккаунтов.",
+        f"Следующий кандидат: @{next_candidate}" if next_candidate != "completed" else "Список кандидатов завершён.",
+    ])
+    result = telegram_api("sendMessage", {"chat_id": ADMIN_ID, "text": "\\n".join(lines)})
     if not result.get("ok"):
-        raise RuntimeError(f"Could not send Telegram notification: {result}")
+        raise RuntimeError(f"Could not send batch notification: {result}")
 
 
 def inspect_username(username):
@@ -164,7 +180,7 @@ def inspect_username(username):
 
 def run_scan():
     checked = 0
-    not_found = 0
+    not_found = []
     next_index = get_next_index()
 
     if next_index >= TOTAL_CANDIDATES:
@@ -195,8 +211,7 @@ def run_scan():
             log.info("@%s: %s (next index: %s/%s)", username, status, next_index, TOTAL_CANDIDATES)
 
             if status == "not_found_unverified":
-                not_found += 1
-                notify(username)
+                not_found.append(username)
 
             if checked < CHECKS_PER_RUN and next_index < TOTAL_CANDIDATES:
                 time.sleep(DELAY)
@@ -208,8 +223,13 @@ def run_scan():
     next_candidate = candidate_at(next_index) if next_index < TOTAL_CANDIDATES else "completed"
     log.info(
         "Finished. Checked this run: %s; not found but unverified: %s; next candidate: %s",
-        checked, not_found, next_candidate,
+        checked, len(not_found), next_candidate,
     )
+    if checked:
+        try:
+            notify_batch(not_found, checked, next_candidate)
+        except Exception:
+            log.exception("Could not send scan summary notification.")
 
 
 if __name__ == "__main__":

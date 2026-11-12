@@ -124,14 +124,23 @@ def save_next_index(index):
 def already_checked(username):
     result = (
         db.table("checked_usernames")
-        .select("status")
+        .select("status,notified_at")
         .eq("username", username)
         .limit(1)
         .execute()
     )
-    # Recheck old "available" results because the previous checker could
-    # produce false positives. Other statuses remain skipped.
-    return bool(result.data) and result.data[0]["status"] != "username_available"
+    if not result.data:
+        return False
+    row = result.data[0]
+    # Revisit a confirmed available name only until its alert is delivered.
+    return row["status"] != "username_available" or bool(row.get("notified_at"))
+
+
+def mark_notified(usernames):
+    for username in usernames:
+        db.table("checked_usernames").update({
+            "notified_at": datetime.now(timezone.utc).isoformat()
+        }).eq("username", username).eq("status", "username_available").execute()
 
 
 def save_result(username, status):
@@ -253,14 +262,18 @@ def notify_batch(available, checked, next_candidate):
     if not result.get("ok"):
         raise RuntimeError(f"Notification failed: {result}")
 
+    # Mark only after Telegram confirms delivery, so failed sends can retry.
+    mark_notified(available)
+
 
 
 def recheck_saved_available():
-    # Revalidate old positive results created by the previous checker.
+    # Revalidate positive results that have not yet generated an alert.
     result = (
         db.table("checked_usernames")
         .select("username")
         .eq("status", "username_available")
+        .is_("notified_at", "null")
         .limit(50)
         .execute()
     )
@@ -289,10 +302,13 @@ def recheck_saved_available():
         lines.extend(f"@{name}" for name in still_available)
     else:
         lines.extend(["", "Старые ложноположительные результаты сняты."])
-    bot_request("sendMessage", {
+    response = bot_request("sendMessage", {
         "chat_id": ADMIN_ID,
-        "text": "\n".join(lines)
+        "text": "\\n".join(lines)
     })
+    if not response.get("ok"):
+        raise RuntimeError(f"Recheck notification failed: {response}")
+    mark_notified(still_available)
 
 
 def run_scan():

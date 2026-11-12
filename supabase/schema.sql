@@ -5,9 +5,13 @@ create table if not exists public.checked_usernames (
   checked_at timestamptz not null default now()
 );
 
--- Update the status constraint for both existing and fresh installations.
+-- Migrate old statuses: the Bot API cannot prove that a username is free.
 alter table public.checked_usernames
   drop constraint if exists checked_usernames_status_check;
+
+update public.checked_usernames
+set status = 'error'
+where status in ('free', 'taken');
 
 alter table public.checked_usernames
   add constraint checked_usernames_status_check

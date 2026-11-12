@@ -123,12 +123,14 @@ def save_next_index(index):
 def already_checked(username):
     result = (
         db.table("checked_usernames")
-        .select("username")
+        .select("status")
         .eq("username", username)
         .limit(1)
         .execute()
     )
-    return bool(result.data)
+    # Recheck old "available" results because the previous checker could
+    # produce false positives. Other statuses remain skipped.
+    return bool(result.data) and result.data[0]["status"] != "username_available"
 
 
 def save_result(username, status):
@@ -153,34 +155,70 @@ def bot_request(method, values):
 
 
 def inspect_username(username):
+    # First check whether Telegram can resolve this name to an existing
+    # account/channel. account.checkUsername alone is not enough to identify
+    # every already-resolved public username.
+    try:
+        client(functions.contacts.ResolveUsernameRequest(username=username))
+        return "username_occupied"
+    except errors.UsernameNotOccupiedError:
+        pass
+    except errors.UsernameInvalidError:
+        return "username_invalid"
+    except errors.RPCError as exc:
+        message = str(getattr(exc, "message", exc)).upper()
+        if "FLOOD_WAIT" in message:
+            raise RuntimeError(
+                "Telegram imposed a flood limit. Stopping safely."
+            ) from exc
+        raise
+
+    # A name not currently resolved must also pass Telegram's account-level
+    # availability check before it can be reported as assignable.
     try:
         available = client(
             functions.account.CheckUsernameRequest(username=username)
         )
-
-        if available:
-            return "username_available"
-
-        return "username_occupied"
-
+        return "username_available" if available else "username_occupied"
     except errors.RPCError as exc:
         message = str(getattr(exc, "message", exc)).upper()
 
         if "USERNAME_OCCUPIED" in message:
             return "username_occupied"
-
         if "USERNAME_PURCHASE_AVAILABLE" in message:
             return "username_collectible_only"
-
         if "USERNAME_INVALID" in message:
             return "username_invalid"
-
         if "FLOOD_WAIT" in message:
             raise RuntimeError(
                 "Telegram imposed a flood limit. Stopping safely."
             ) from exc
-
         raise
+
+
+def verify_checker():
+    # Known public username must resolve to an existing Telegram peer.
+    known = client(functions.contacts.ResolveUsernameRequest(username="durov"))
+    if not getattr(known, "users", None) and not getattr(known, "chats", None):
+        raise RuntimeError("Checker self-test failed: @durov did not resolve.")
+
+    me = client.get_me()
+    if not me:
+        raise RuntimeError("Checker self-test failed: cannot read session account.")
+
+    if me.username:
+        own = client(functions.contacts.ResolveUsernameRequest(username=me.username))
+        resolved_ids = [getattr(user, "id", None) for user in getattr(own, "users", [])]
+        if me.id not in resolved_ids:
+            raise RuntimeError(
+                "Checker self-test failed: own username did not resolve to this session."
+            )
+
+    log.info(
+        "Self-test passed. Session account ID=%s, username=%s; @durov resolves.",
+        me.id,
+        me.username or "(no username)"
+    )
 
 
 def notify_batch(available, checked, next_candidate):
@@ -271,6 +309,7 @@ def main():
         )
 
     try:
+        verify_checker()
         run_scan()
     finally:
         client.disconnect()

@@ -10,7 +10,8 @@ import urllib.request
 from datetime import datetime, timezone
 
 from supabase import create_client
-from telethon import TelegramClient, functions, errors
+from telethon.sync import TelegramClient
+from telethon import functions, errors
 from telethon.sessions import StringSession
 
 logging.basicConfig(

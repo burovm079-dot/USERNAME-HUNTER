@@ -1,28 +1,25 @@
-import asyncio
 import logging
 import os
 import random
 import string
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
+import json
 from datetime import datetime, timezone
 
 from supabase import create_client
-from telethon import TelegramClient, errors, functions
-from telethon.sessions import StringSession
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("username-hunter-action")
 
-API_ID = int(os.environ["API_ID"])
-API_HASH = os.environ["API_HASH"]
-SESSION = os.environ["TELETHON_SESSION"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_ID = os.environ["ADMIN_ID"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
 DELAY = max(5.0, float(os.getenv("CHECK_DELAY", "5")))
-CHECKS_PER_RUN = max(1, min(40, int(os.getenv("CHECKS_PER_RUN", "20"))))
+CHECKS_PER_RUN = max(1, min(20, int(os.getenv("CHECKS_PER_RUN", "20"))))
 ABC = string.ascii_lowercase
 VOWELS = "aeiou"
 CONSONANTS = "bcdfghjklmnpqrstvwxyz"
@@ -39,11 +36,9 @@ def readable_candidate():
     if pattern == 0:
         return random.choice(ABC) * 2 + "".join(random.choices(ABC, k=3))
     if pattern == 1:
-        return "".join((
-            random.choice(CONSONANTS), random.choice(VOWELS),
-            random.choice(CONSONANTS), random.choice(VOWELS),
-            random.choice(CONSONANTS),
-        ))
+        return "".join((random.choice(CONSONANTS), random.choice(VOWELS),
+                        random.choice(CONSONANTS), random.choice(VOWELS),
+                        random.choice(CONSONANTS)))
     if pattern == 2:
         a, b, c = random.choices(ABC, k=3)
         return a + b + c + b + a
@@ -52,18 +47,11 @@ def readable_candidate():
 
 
 def candidate():
-    # "both": alternate randomly between fully random and readable patterns.
     return readable_candidate() if random.random() < 0.5 else random_candidate()
 
 
 def already_checked(username):
-    result = (
-        db.table("checked_usernames")
-        .select("username")
-        .eq("username", username)
-        .limit(1)
-        .execute()
-    )
+    result = db.table("checked_usernames").select("username").eq("username", username).limit(1).execute()
     return bool(result.data)
 
 
@@ -75,59 +63,71 @@ def save_result(username, status):
     }).execute()
 
 
-def notify(username):
-    body = urllib.parse.urlencode({
-        "chat_id": ADMIN_ID,
-        "text": (
-            f"🎯 Telegram сообщил, что имя может быть свободно: @{username}\n"
-            f"https://t.me/{username}\n\n"
-            "Это моментальный результат, не бронь. Проверь и попробуй занять сразу."
-        ),
-    }).encode()
+def telegram_api(method, values):
+    body = urllib.parse.urlencode(values).encode()
     request = urllib.request.Request(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+        f"https://api.telegram.org/bot{BOT_TOKEN}/{method}",
         data=body,
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=20) as response:
-        if response.status != 200:
-            raise RuntimeError(f"Telegram Bot API returned HTTP {response.status}")
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return json.loads(response.read().decode())
+    except urllib.error.HTTPError as exc:
+        try:
+            payload = json.loads(exc.read().decode())
+        except Exception:
+            payload = {}
+        if exc.code == 429:
+            raise RuntimeError("Telegram rate limit (429); stopping this run.") from exc
+        return payload
 
 
-async def run_scan():
-    checked_this_run = 0
-    free_this_run = 0
-    async with TelegramClient(StringSession(SESSION), API_ID, API_HASH) as client:
-        log.info("Connected to Telegram. Checking up to %s candidates.", CHECKS_PER_RUN)
-        attempts = 0
-        max_attempts = CHECKS_PER_RUN * 5
-        while checked_this_run < CHECKS_PER_RUN and attempts < max_attempts:
-            attempts += 1
-            username = candidate()
-            try:
-                if already_checked(username):
-                    continue
-                available = await client(
-                    functions.account.CheckUsernameRequest(username=username)
-                )
-                status = "free" if available else "taken"
-                save_result(username, status)
-                checked_this_run += 1
-                log.info("Checked @%s: %s", username, status)
-                if available:
-                    free_this_run += 1
-                    await asyncio.to_thread(notify, username)
-                if checked_this_run < CHECKS_PER_RUN:
-                    await asyncio.sleep(DELAY)
-            except errors.FloodWaitError as exc:
-                log.warning("Telegram requested FloodWait of %s seconds; stopping this run.", exc.seconds)
-                break
-            except Exception:
-                log.exception("Error while checking @%s; stopping this run to avoid repeated failures.", username)
-                break
+def notify(username):
+    text = (
+        f"🔎 Проверка @{username}: Bot API не нашёл публичный чат с таким именем.\n"
+        "⚠️ Это НЕ означает, что username свободен: имя может принадлежать пользователю "
+        "или быть недоступным для проверки через Bot API. Проверь вручную в Telegram."
+    )
+    result = telegram_api("sendMessage", {"chat_id": ADMIN_ID, "text": text})
+    if not result.get("ok"):
+        raise RuntimeError(f"Could not send Telegram notification: {result}")
 
-    log.info("Finished. New checks: %s; potentially available: %s.", checked_this_run, free_this_run)
+
+def inspect_username(username):
+    result = telegram_api("getChat", {"chat_id": f"@{username}"})
+    if result.get("ok"):
+        return "public_chat_found"
+    description = str(result.get("description", "")).lower()
+    if "chat not found" in description or "username not found" in description:
+        return "not_found_unverified"
+    raise RuntimeError(f"Telegram getChat failed: {result}")
+
+
+def run_scan():
+    checked = 0
+    not_found = 0
+    attempts = 0
+    while checked < CHECKS_PER_RUN and attempts < CHECKS_PER_RUN * 5:
+        attempts += 1
+        username = candidate()
+        if already_checked(username):
+            continue
+        try:
+            status = inspect_username(username)
+            save_result(username, status)
+            checked += 1
+            log.info("@%s: %s", username, status)
+            if status == "not_found_unverified":
+                not_found += 1
+                notify(username)
+            if checked < CHECKS_PER_RUN:
+                time.sleep(DELAY)
+        except Exception:
+            log.exception("Check failed; stopping this run to avoid repeated requests.")
+            break
+    log.info("Finished. Checked: %s; not found but unverified: %s.", checked, not_found)
 
 
 if __name__ == "__main__":
-    asyncio.run(run_scan())
+    run_scan()

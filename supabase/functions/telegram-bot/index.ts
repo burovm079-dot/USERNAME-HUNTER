@@ -1,7 +1,7 @@
 const BOT_TOKEN = Deno.env.get("BOT_TOKEN")!;
 const ADMIN_ID = Deno.env.get("ADMIN_ID")!;
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SECRET_KEY = Deno.env.get("SUPABASE_SECRET_KEY")!;
+const SUPABASE_SECRET_KEY = Deno.env.get("DB_SECRET_KEY")!;
 const WEBHOOK_SECRET = Deno.env.get("WEBHOOK_SECRET")!;
 
 const corsHeaders = { "content-type": "application/json" };

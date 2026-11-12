@@ -34,8 +34,9 @@ async function db(path: string) {
     },
   });
   if (!response.ok) {
-    console.error("Supabase read failed", response.status, await response.text());
-    throw new Error("Database read failed");
+    const details = await response.text();
+    console.error("Supabase read failed", response.status, details);
+    throw new Error(`Database read failed (${response.status}): ${details.slice(0, 250)}`);
   }
   const range = response.headers.get("content-range");
   const count = range?.split("/")[1];
@@ -51,6 +52,8 @@ Deno.serve(async (req: Request) => {
     return new Response("Unauthorized", { status: 401 });
   }
 
+  let chatId: number | string | null = null;
+
   try {
     const update = await req.json();
     const message = update.message;
@@ -58,9 +61,9 @@ Deno.serve(async (req: Request) => {
       return new Response(JSON.stringify({ ok: true }), { headers: corsHeaders });
     }
 
-    const chatId = message.chat.id;
+    chatId = message.chat.id;
     const userId = String(message.from?.id ?? "");
-    const command = message.text.trim().split(/\s+/)[0].split("@")[0].toLowerCase();
+    const command = message.text.trim().split(/\\s+/)[0].split("@")[0].toLowerCase();
 
     if (command === "/myid") {
       await sendMessage(chatId, `Твой Telegram ID: ${userId}`);
@@ -74,17 +77,17 @@ Deno.serve(async (req: Request) => {
 
     if (command === "/start") {
       await sendMessage(chatId,
-        "USERNAME HUNTER\n" +
-        "/myid — показать Telegram ID\n" +
-        "/scan — информация о фоновом поиске\n" +
-        "/status — статистика\n" +
-        "/list — последние непроверенные кандидаты\n\n" +
+        "USERNAME HUNTER\\n" +
+        "/myid — показать Telegram ID\\n" +
+        "/scan — информация о фоновом поиске\\n" +
+        "/status — статистика\\n" +
+        "/list — последние непроверенные кандидаты\\n\\n" +
         "⚠️ Bot API не может подтвердить, что username свободен. «Не найдено» не означает «свободно»."
       );
     } else if (command === "/scan") {
       await sendMessage(chatId,
-        "🔎 Фоновый поиск выполняется GitHub Actions примерно каждые 5 минут.\n" +
-        "Каждый запуск проверяет до 20 кандидатов. Команда не запускает отдельный непрерывный процесс.\n" +
+        "🔎 Фоновый поиск выполняется GitHub Actions примерно каждые 5 минут.\\n" +
+        "Каждый запуск проверяет до 20 кандидатов. Команда не запускает отдельный непрерывный процесс.\\n" +
         "⚠️ Результаты Bot API не подтверждают свободный username."
       );
     } else if (command === "/status") {
@@ -94,10 +97,10 @@ Deno.serve(async (req: Request) => {
         db("checked_usernames?select=username&status=eq.not_found_unverified"),
       ]);
       await sendMessage(chatId,
-        "📊 USERNAME HUNTER\n" +
-        `Всего записей: ${all.count}\n` +
-        `Публичный чат найден: ${publicChats.count}\n` +
-        `Не найдено через Bot API (не значит свободно): ${unverified.count}\n` +
+        "📊 USERNAME HUNTER\\n" +
+        `Всего записей: ${all.count}\\n` +
+        `Публичный чат найден: ${publicChats.count}\\n` +
+        `Не найдено через Bot API (не значит свободно): ${unverified.count}\\n` +
         "Фоновый запуск: примерно раз в 5 минут."
       );
     } else if (command === "/list") {
@@ -108,7 +111,7 @@ Deno.serve(async (req: Request) => {
       } else {
         const lines = rows.map((row) => `@${row.username} — ${String(row.checked_at).slice(0, 16)}`);
         await sendMessage(chatId,
-          "🔎 Не найдено через Bot API (это НЕ список свободных имён):\n" + lines.join("\n")
+          "🔎 Не найдено через Bot API (это НЕ список свободных имён):\\n" + lines.join("\\n")
         );
       }
     } else if (command === "/stop") {
@@ -118,7 +121,15 @@ Deno.serve(async (req: Request) => {
     }
     return new Response(JSON.stringify({ ok: true }), { headers: corsHeaders });
   } catch (error) {
-    console.error(error);
-    return new Response(JSON.stringify({ ok: false }), { status: 200, headers: corsHeaders });
+    console.error("Webhook command failed:", error);
+    if (chatId !== null) {
+      try {
+        const detail = error instanceof Error ? error.message : String(error);
+        await sendMessage(chatId, "⚠️ Ошибка при выполнении команды:\\n" + detail.slice(0, 500));
+      } catch (sendError) {
+        console.error("Could not send error message to Telegram:", sendError);
+      }
+    }
+    return new Response(JSON.stringify({ ok: true }), { headers: corsHeaders });
   }
 });
